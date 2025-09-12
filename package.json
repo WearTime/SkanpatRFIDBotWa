@@ -1,0 +1,40 @@
+{
+  "name": "botwaortusiswa",
+  "version": "1.0.0",
+  "description": "Ini adalah Bot wa untuk mendapatkan data dari rfid laravel terus kirim ke wa orang tua siswa",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "dev": "nodemon server.js",
+    "generate-key": "node src/generate/encryptionKey.js",
+    "test": "jest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WearTime/SkanpatRFIDBotWa.git"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "rfid",
+    "attendance",
+    "laravel"
+  ],
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "express": "^4.18.2",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.22.2",
+    "winston": "^3.17.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.1"
+  },
+  "author": "Muhamad Rizqi Wiransyah & Muhammad Bangkit Sanjaya",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/WearTime/SkanpatRFIDBotWa/issues"
+  },
+  "homepage": "https://github.com/WearTime/SkanpatRFIDBotWa#readme"
+}
