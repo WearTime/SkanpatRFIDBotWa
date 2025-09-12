@@ -137,7 +137,10 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+<<<<<<< HEAD
 
 #Whatsapp Web Js Files
 .wwebjs_auth
 .wwebjs_cache
+=======
+>>>>>>> c8a8689ca6335ea14215f936371ae37fef1cace3
