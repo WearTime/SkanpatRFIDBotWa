@@ -1,3 +1,5 @@
+const config = require("../config");
+
 const formataPhoneNumber = (phoneNumber) => {
   try {
     let cleaned = phoneNumber.replace(/\D/g, "");

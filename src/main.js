@@ -4,13 +4,14 @@ const qrcode = require("qrcode-terminal");
 const { logHelpers, logger } = require("./handler/logger");
 const config = require("./config");
 const { validateApiKey } = require("./handler/apiKey");
-const { smartDecrypt } = require("./handler/encryption");
+const { smartDecrypt, encryptDataCBC } = require("./handler/encryption");
 const {
   formatAttendanceMessage,
   formataPhoneNumber,
 } = require("./handler/formatMessage");
 const app = express();
 app.use(express.json());
+const crypto = require("crypto");
 require("dotenv").config();
 
 const PORT = process.env.PORT;
@@ -38,6 +39,7 @@ client.on("code", (code) => {
 client.on("ready", () => {
   const clientInfo = client.info;
   logger.info(`✅ WhatsApp Bot berhasil terhubung!`);
+  clientReady = true;
   logger.info(`📱 Nomor: ${clientInfo.wid.user}`);
   logger.info(`👤 Nama: ${clientInfo.pushname}\n`);
 
@@ -310,7 +312,6 @@ const server = app.listen(config.server.port, config.server.host, () => {
   console.log(`   • POST /send-attendance - Kirim notifikasi absensi`);
   console.log(`   • GET  /status         - Cek status bot`);
   console.log(`   • GET  /health         - Health check`);
-  console.log(`   • POST /generate-key   - Generate API key manual\n`);
 
   logger.info("Server Started", {
     port: config.server.port,
