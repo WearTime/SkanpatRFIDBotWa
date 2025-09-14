@@ -15,34 +15,57 @@ const decryptRequestData = (encryptedData, timestamp) => {
     const iv = generateIVFromTimestamp(timestamp);
     const encryptedBuffer = Buffer.from(encryptedData, "hex");
 
+    logger.info("GCM Decrypt attempt", {
+      algorithm: algorithm,
+      key_length: key.length,
+      iv_length: iv.length,
+      iv_hex: iv.toString("hex"),
+      encrypted_length: encryptedBuffer.length,
+      encrypted_preview: encryptedData.substring(0, 32) + "...",
+    });
+
+    const tagLength = 16;
+
+    if (encryptedBuffer.length < tagLength) {
+      throw new Error(
+        `Encrypted data too short. Got ${encryptedBuffer.length}, need at least ${tagLength}`
+      );
+    }
+
+    const encrypted = encryptedBuffer.slice(0, -tagLength);
+    const authTag = encryptedBuffer.slice(-tagLength);
+
+    logger.info("Split encrypted and tag", {
+      encrypted_length: encrypted.length,
+      tag_length: authTag.length,
+      tag_hex: authTag.toString("hex"),
+    });
+
     const decipher = crypto.createDecipheriv(algorithm, key, iv);
 
-    try {
-      decipher.setAAD(Buffer.from("request-data"));
-    } catch (aadError) {
-      logHelpers.error(new Error("AAD not supported"), {
-        context: "Decryption AAD",
-      });
-    }
+    decipher.setAuthTag(authTag);
 
-    let decrypted = decipher.update(encryptedBuffer, null, "utf8");
+    decipher.setAAD(Buffer.from("request-data"));
+
+    let decrypted = decipher.update(encrypted, null, "utf8");
     decrypted += decipher.final("utf8");
 
-    return JSON.parse(decrypted);
+    const result = JSON.parse(decrypted);
+    logger.info("GCM Decrypt SUCCESS", {
+      result_keys: Object.keys(result),
+      student_name: result.student_name,
+    });
+
+    return result;
   } catch (error) {
-    try {
-      return decryptDataCBC(encryptedData, timestamp);
-    } catch (cbcError) {
-      logHelpers.error(error, {
-        context: "Request Data Decryption",
-        timestamp: timestamp,
-        encryptedDataLength: encryptedData?.length,
-      });
-      throw new Error("Failed to decrypt request data: " + error.message);
-    }
+    logHelpers.error(error, {
+      context: "Request Data Decryption GCM",
+      timestamp: timestamp,
+      encryptedDataLength: encryptedData?.length,
+    });
+    throw new Error("Failed to decrypt GCM data: " + error.message);
   }
 };
-
 const encryptResponseData = (data, timestamp = null) => {
   try {
     const algorithm = "aes-256-gcm";
@@ -52,29 +75,14 @@ const encryptResponseData = (data, timestamp = null) => {
       : crypto.randomBytes(16);
 
     const cipher = crypto.createCipheriv(algorithm, key, iv);
-
-    try {
-      cipher.setAAD(Buffer.from("response-data"));
-    } catch (aadError) {
-      logHelpers.error(new Error("AAD not supported"), {
-        context: "Response Encryption AAD",
-      });
-    }
+    cipher.setAAD(Buffer.from("response-data"));
 
     const jsonData = JSON.stringify(data);
     let encrypted = cipher.update(jsonData, "utf8");
     const final = cipher.final();
+    const authTag = cipher.getAuthTag();
 
-    const encryptedBuffer = Buffer.concat([encrypted, final]);
-
-    let authTag = null;
-    try {
-      authTag = cipher.getAuthTag();
-    } catch (tagError) {
-      logHelpers.error(new Error("Auth tag not available"), {
-        context: "Response Encryption Tag",
-      });
-    }
+    const encryptedBuffer = Buffer.concat([encrypted, final, authTag]);
 
     return {
       encrypted_data: encryptedBuffer.toString("hex"),
@@ -116,11 +124,26 @@ const decryptDataCBC = (encryptedData, timestamp) => {
     const iv = generateIVFromTimestamp(timestamp);
     const encryptedBuffer = Buffer.from(encryptedData, "hex");
 
+    logger.info("CBC Decrypt attempt", {
+      algorithm: algorithm,
+      key_length: key.length,
+      iv_length: iv.length,
+      iv_hex: iv.toString("hex"),
+      encrypted_length: encryptedBuffer.length,
+    });
+
     const decipher = crypto.createDecipheriv(algorithm, key, iv);
+
     let decrypted = decipher.update(encryptedBuffer, null, "utf8");
     decrypted += decipher.final("utf8");
 
-    return JSON.parse(decrypted);
+    const result = JSON.parse(decrypted);
+    logger.info("CBC Decrypt SUCCESS", {
+      result_keys: Object.keys(result),
+      student_name: result.student_name,
+    });
+
+    return result;
   } catch (error) {
     logHelpers.error(error, { context: "CBC Decryption" });
     throw new Error("Failed to decrypt CBC data: " + error.message);
@@ -129,15 +152,18 @@ const decryptDataCBC = (encryptedData, timestamp) => {
 
 const smartDecrypt = (encryptedData, timestamp) => {
   try {
+    logger.info("Trying GCM decryption first...");
     return decryptRequestData(encryptedData, timestamp);
   } catch (gcmError) {
-    logHelpers.error(gcmError, {
-      context: "GCM Decrypt Failed, trying CBC",
+    logger.warn("GCM decrypt failed, trying CBC fallback", {
+      error: gcmError.message,
     });
+
     try {
+      logger.info("Trying CBC decryption...");
       return decryptDataCBC(encryptedData, timestamp);
     } catch (cbcError) {
-      logHelpers.error(cbcError, { context: "CBC Decrypt Failed" });
+      logHelpers.error(cbcError, { context: "All Decryption Failed" });
       throw new Error("All decryption methods failed: " + gcmError.message);
     }
   }

@@ -1,10 +1,9 @@
 const express = require("express");
 const { Client, LocalAuth } = require("whatsapp-web.js");
-const qrcode = require("qrcode-terminal");
 const { logHelpers, logger } = require("./handler/logger");
 const config = require("./config");
 const { validateApiKey } = require("./handler/apiKey");
-const { smartDecrypt, encryptDataCBC } = require("./handler/encryption");
+const { smartDecrypt } = require("./handler/encryption");
 const {
   formatAttendanceMessage,
   formataPhoneNumber,
@@ -14,8 +13,6 @@ app.use(express.json());
 const crypto = require("crypto");
 require("dotenv").config();
 
-const PORT = process.env.PORT;
-const SHARED_SECRET = process.env.SECRET;
 const SCHOOL_NAME = process.env.SCHOOL;
 
 let currentApiKey = "";
@@ -160,6 +157,7 @@ app.post("/send-attendance", async (req, res) => {
           "Invalid request format: data, timestamp (body) dan x-api-key (header) diperlukan",
       });
     }
+
     const currentTimestamp = Math.floor(Date.now() / 1000);
     const timestampDiff = Math.abs(currentTimestamp - timestamp);
 
@@ -194,6 +192,13 @@ app.post("/send-attendance", async (req, res) => {
     let decryptedData;
     try {
       decryptedData = smartDecrypt(data, timestamp);
+
+      logger.info("Decryption successful", {
+        dataKeys: Object.keys(decryptedData),
+        studentName: decryptedData.student_name,
+        parentPhoneType: typeof decryptedData.parent_phone,
+        parentPhoneIsArray: Array.isArray(decryptedData.parent_phone),
+      });
     } catch (error) {
       logHelpers.securityEvent("Decryption Failed", {
         ip: req.ip,
@@ -217,6 +222,13 @@ app.post("/send-attendance", async (req, res) => {
     } = decryptedData;
 
     if (!student_name || !parent_phone || !attendance_time || !student_class) {
+      logger.error("Missing required fields", {
+        hasStudentName: !!student_name,
+        hasParentPhone: !!parent_phone,
+        hasAttendanceTime: !!attendance_time,
+        hasStudentClass: !!student_class,
+      });
+
       return res.status(400).json({
         success: false,
         message: "Data tidak lengkap semua wajib diisi",
@@ -231,38 +243,113 @@ app.post("/send-attendance", async (req, res) => {
     }
 
     const message = formatAttendanceMessage(decryptedData);
-    const whatsappNumber = formataPhoneNumber(parent_phone);
 
-    logger.info("Mengirim pesan WhatsApp", {
-      student: student_name,
-      attendanceType: attendance_type,
-      phone: whatsappNumber.replace(/\d(?=\d{4})/g, "*"),
-    });
+    let whatsappNumbers = [];
 
-    await client.sendMessage(whatsappNumber, message);
+    try {
+      if (Array.isArray(parent_phone)) {
+        whatsappNumbers = parent_phone.map((phone) =>
+          formataPhoneNumber(phone)
+        );
+      } else {
+        whatsappNumbers = [formataPhoneNumber(parent_phone)];
+      }
 
-    logHelpers.messageSent(whatsappNumber, student_name, attendance_type, true);
+      logger.info("Phone numbers formatted", {
+        originalPhones: parent_phone,
+        formattedCount: whatsappNumbers.length,
+        firstFormatted: whatsappNumbers[0]?.replace(/\d(?=\d{4})/g, "*"),
+      });
+    } catch (phoneError) {
+      logger.error("Phone number formatting failed", {
+        error: phoneError.message,
+        parentPhone: parent_phone,
+      });
 
-    const responseData = {
-      success: true,
-      message: "Pesan berhasil dikirim",
-    };
+      return res.status(400).json({
+        success: false,
+        message: "Invalid phone number format: " + phoneError.message,
+      });
+    }
 
-    if (config.security.encryptResponse) {
+    let successCount = 0;
+    let errors = [];
+
+    for (let i = 0; i < whatsappNumbers.length; i++) {
+      const whatsappNumber = whatsappNumbers[i];
+
       try {
-        const encryptedResponse = encryptResponseData(responseData, timestamp);
-        res.status(200).json(encryptedResponse);
-      } catch (encryptError) {
-        logHelpers.error(encryptError, { context: "Response Encryption" });
+        logger.info(`Sending message ${i + 1}/${whatsappNumbers.length}`, {
+          student: student_name,
+          attendanceType: attendance_type,
+          phone: whatsappNumber.replace(/\d(?=\d{4})/g, "*"),
+        });
+
+        await client.sendMessage(whatsappNumber, message);
+
+        logHelpers.messageSent(
+          whatsappNumber,
+          student_name,
+          attendance_type,
+          true
+        );
+        successCount++;
+      } catch (sendError) {
+        logger.error(`Failed to send message ${i + 1}`, {
+          phone: whatsappNumber.replace(/\d(?=\d{4})/g, "*"),
+          error: sendError.message,
+        });
+
+        errors.push({
+          phone: whatsappNumber,
+          error: sendError.message,
+        });
+
+        logHelpers.messageSent(
+          whatsappNumber,
+          student_name,
+          attendance_type,
+          false
+        );
+      }
+    }
+
+    if (successCount > 0) {
+      const responseData = {
+        success: true,
+        message: `Pesan berhasil dikirim ke ${successCount}/${whatsappNumbers.length} nomor`,
+        details: {
+          successCount: successCount,
+          totalCount: whatsappNumbers.length,
+          errors: errors.length > 0 ? errors : undefined,
+        },
+      };
+
+      if (config.security.encryptResponse) {
+        try {
+          const encryptedResponse = encryptResponseData(
+            responseData,
+            timestamp
+          );
+          res.status(200).json(encryptedResponse);
+        } catch (encryptError) {
+          logHelpers.error(encryptError, { context: "Response Encryption" });
+          res.status(200).json(responseData);
+        }
+      } else {
         res.status(200).json(responseData);
       }
     } else {
-      res.status(200).json(responseData);
+      res.status(500).json({
+        success: false,
+        message: "Gagal mengirim pesan ke semua nomor",
+        errors: errors,
+      });
     }
   } catch (error) {
     logHelpers.error(error, {
       context: "Send Attendance Encrypted",
-      hasEncryptedData: !!req.body.encrypted_data,
+      hasEncryptedData: !!req.body.data,
     });
 
     const errorResponse = {
