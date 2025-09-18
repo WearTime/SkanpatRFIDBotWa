@@ -7,16 +7,20 @@ const { smartDecrypt } = require("./handler/encryption");
 const {
   formatAttendanceMessage,
   formataPhoneNumber,
+  formatPermissionMessage,
 } = require("./handler/formatMessage");
 const app = express();
 app.use(express.json());
 const crypto = require("crypto");
+const { sendPermissionConfirmation } = require("./handler/permission");
 require("dotenv").config();
 
 const SCHOOL_NAME = process.env.SCHOOL;
 
 let currentApiKey = "";
 let clientReady = false;
+
+const pendingConfirmations = new Map();
 
 const client = new Client({
   authStrategy: new LocalAuth({
@@ -69,6 +73,9 @@ client.on("disconnected", (reason) => {
 });
 
 client.on("message", async (message) => {
+  const messageBody = message.body.trim().toLocaleLowerCase();
+  const messageSender = message.from;
+
   logHelpers.whatsappEvent("Message Received", {
     from: message.from,
     body:
@@ -87,7 +94,108 @@ client.on("message", async (message) => {
       });
     }
   }
+
+  const confirmationData = pendingConfirmations.get(messageSender);
+
+  if (confirmationData) {
+    logger.info("Processing permission confirmation", {
+      from: messageSender,
+      message: messageBody,
+      studentName: confirmationData.student_name,
+    });
+
+    let confirmationStatus = null;
+    let responseMessage = "";
+
+    if (
+      config.messages.approvalMessage.includes(messageBody.toLocaleLowerCase())
+    ) {
+      confirmationStatus = "approved";
+      responseMessage = `✅ *Konfirmasi Diterima*\n\nIzin untuk *${confirmationData.student_name}* telah disetujui.\n\nTerima kasih atas konfirmasinya.`;
+    } else if (
+      config.messages.rejectedMessage.includes(messageBody.toLocaleLowerCase())
+    ) {
+      confirmationStatus = "rejected";
+      responseMessage = `❌ *Konfirmasi Ditolak*\n\nIzin untuk *${confirmationData.student_name}* telah ditolak.\n\nTerima kasih atas konfirmasinya.`;
+    } else {
+      responseMessage = `⚠️ *Konfirmasi Tidak Valid*\n\nMohon balas dengan:\n• *"Ya"* atau *"Yes"* untuk menyetujui\n• *"Tidak"* atau *"No"* untuk menolak\n\nIzin untuk: *${confirmationData.student_name}*`;
+
+      try {
+        await message.reply(responseMessage);
+      } catch (error) {
+        logger.error("Failed to send invalid confirmation message", {
+          error: error.message,
+          from: senderNumber,
+        });
+      }
+
+      return;
+    }
+
+    try {
+      const apiResponse = await sendPermissionConfirmation({
+        ...confirmationData,
+        confirmation_status: confirmationStatus,
+        confirmed_at: new Date().toISOString(),
+      });
+
+      logger.info("Permission confirmation sent to API", {
+        studentName: confirmationData.student_name,
+        status: confirmationStatus,
+        apiResponse: apiResponse.data,
+      });
+
+      pendingConfirmations.delete(senderNumber);
+
+      await message.reply(responseMessage);
+
+      logHelpers.whatsappEvent("Permission Confirmed", {
+        from: senderNumber,
+        studentName: confirmationData.student_name,
+        status: confirmationStatus,
+      });
+    } catch (apiError) {
+      logger.error("Failed to send confirmation to API", {
+        error: apiError.message,
+        studentName: confirmationData.student_name,
+        status: confirmationStatus,
+      });
+
+      const errorMessage =
+        responseMessage +
+        `\n\n⚠️ *Catatan*: Terjadi kesalahan sistem saat menyimpan konfirmasi. Mohon hubungi sekolah jika diperlukan.`;
+
+      try {
+        await message.reply(errorMessage);
+      } catch (replyError) {
+        logger.error("Failed to send error confirmation message", {
+          error: replyError.message,
+          from: senderNumber,
+        });
+      }
+    }
+  }
 });
+
+setInterval(() => {
+  const now = Date();
+  const expiredKeys = [];
+
+  for (const [key, data] of pendingConfirmations.entries()) {
+    if (now - data.created_at > 24 * 60 * 60 * 1000) {
+      expiredKeys.push(key);
+    }
+  }
+
+  expiredKeys.forEach((key) => {
+    pendingConfirmations.delete(key);
+    logger.info("Expired pending confirmation removed", { phoneNumber: key });
+  });
+
+  if (expiredKeys.length > 0) {
+    logger.info("Cleanup completed", { expiredCount: expiredKeys.length });
+  }
+}, 60 * 60 * 1000);
 
 app.get("/health", (req, res) => {
   res.json({
@@ -321,6 +429,265 @@ app.post("/send-attendance", async (req, res) => {
         details: {
           successCount: successCount,
           totalCount: whatsappNumbers.length,
+          errors: errors.length > 0 ? errors : undefined,
+        },
+      };
+
+      if (config.security.encryptResponse) {
+        try {
+          const encryptedResponse = encryptResponseData(
+            responseData,
+            timestamp
+          );
+          res.status(200).json(encryptedResponse);
+        } catch (encryptError) {
+          logHelpers.error(encryptError, { context: "Response Encryption" });
+          res.status(200).json(responseData);
+        }
+      } else {
+        res.status(200).json(responseData);
+      }
+    } else {
+      res.status(500).json({
+        success: false,
+        message: "Gagal mengirim pesan ke semua nomor",
+        errors: errors,
+      });
+    }
+  } catch (error) {
+    logHelpers.error(error, {
+      context: "Send Attendance Encrypted",
+      hasEncryptedData: !!req.body.data,
+    });
+
+    const errorResponse = {
+      success: false,
+      message: "Gagal mengirim pesan",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : "Internal server error",
+    };
+
+    res.status(500).json(errorResponse);
+  }
+});
+
+// Ini Untuk Izin
+app.post("/send-permission", async (req, res) => {
+  try {
+    const { data, timestamp } = req.body;
+    const api_key = req.headers["x-api-key"];
+
+    if (!clientReady) {
+      return res.status(503).json({
+        success: false,
+        message: "WhatsApp client belum siap",
+      });
+    }
+
+    if (!config.security.encryptionKey) {
+      logHelpers.securityEvent("Encryption Key Missing", {
+        ip: req.ip,
+        userAgent: req.get("User-Agent"),
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: "Server not configured",
+      });
+    }
+
+    if (!data || !timestamp || !api_key) {
+      logHelpers.securityEvent("Invalid Encrypted Request Format", {
+        ip: req.ip,
+        userAgent: req.get("User-Agent"),
+        hasEncryptedData: !!data,
+        hasTimestamp: !!timestamp,
+        hasApiKey: !!api_key,
+      });
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid request format: data, timestamp (body) dan x-api-key (header) diperlukan",
+      });
+    }
+
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const timestampDiff = Math.abs(currentTimestamp - timestamp);
+
+    if (timestampDiff > 300) {
+      logHelpers.securityEvent("Timestamp Too Old", {
+        ip: req.ip,
+        receivedTimestamp: timestamp,
+        currentTimestamp: currentTimestamp,
+        difference: timestampDiff,
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Request timestamp too old or invalid",
+      });
+    }
+
+    if (!validateApiKey(api_key, timestamp)) {
+      logHelpers.securityEvent("Unauthorized Access Attempt", {
+        ip: req.ip,
+        userAgent: req.get("User-Agent"),
+        apiKeyPreview: api_key.substring(0, 8) + "...",
+        timestamp: timestamp,
+      });
+
+      return res.status(401).json({
+        success: false,
+        message: "Invalid API key atau timestamp",
+      });
+    }
+
+    let decryptedData;
+    try {
+      decryptedData = smartDecrypt(data, timestamp);
+
+      logger.info("Decryption successful", {
+        dataKeys: Object.keys(decryptedData),
+        studentName: decryptedData.student_name,
+        parentPhoneType: typeof decryptedData.parent_phone,
+        parentPhoneIsArray: Array.isArray(decryptedData.parent_phone),
+      });
+    } catch (error) {
+      logHelpers.securityEvent("Decryption Failed", {
+        ip: req.ip,
+        userAgent: req.get("User-Agent"),
+        error: error.message,
+        timestamp: timestamp,
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Failed to read request data",
+      });
+    }
+
+    const {
+      nisn,
+      parent_phone,
+      permission_date,
+      permission_type,
+      permission_note,
+    } = decryptedData;
+
+    if (!nisn || !parent_phone || !permission_date || !permission_note) {
+      logger.error("Missing required fields", {
+        hasStudentNisn: !!nisn,
+        hasParentPhone: !!parent_phone,
+        hasPermissionDate: !!permission_date,
+        hasPermissionNote: !!permission_note,
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Data tidak lengkap semua wajib diisi",
+      });
+    }
+
+    if (!["sakit", "izin", "dispensasi"].includes(permission_type)) {
+      return res.status(400).json({
+        success: false,
+        message: 'permission_type harus "sakit", "izin" atau "dispensasi" ',
+      });
+    }
+
+    const message = formatPermissionMessage(decryptedData);
+
+    let whatsappNumbers = [];
+
+    try {
+      if (Array.isArray(parent_phone)) {
+        whatsappNumbers = parent_phone.map((phone) =>
+          formataPhoneNumber(phone)
+        );
+      } else {
+        whatsappNumbers = [formataPhoneNumber(parent_phone)];
+      }
+
+      logger.info("Phone numbers formatted", {
+        originalPhones: parent_phone,
+        formattedCount: whatsappNumbers.length,
+        firstFormatted: whatsappNumbers[0]?.replace(/\d(?=\d{4})/g, "*"),
+      });
+    } catch (phoneError) {
+      logger.error("Phone number formatting failed", {
+        error: phoneError.message,
+        parentPhone: parent_phone,
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid phone number format: " + phoneError.message,
+      });
+    }
+
+    let successCount = 0;
+    let errors = [];
+
+    for (let i = 0; i < whatsappNumbers.length; i++) {
+      const whatsappNumber = whatsappNumbers[i];
+
+      try {
+        logger.info(`Sending message ${i + 1}/${whatsappNumbers.length}`, {
+          student: student_name,
+          permission_type: permission_type,
+          phone: whatsappNumber.replace(/\d(?=\d{4})/g, "*"),
+        });
+
+        await client.sendMessage(whatsappNumber, message);
+
+        pendingConfirmations.set(whatsappNumber, {
+          nisn,
+          parent_phone: whatsappNumber,
+          permission_date,
+          permission_type,
+          permission_note,
+          created_at: Date.now(),
+          message_sent_at: new Date().toISOString(),
+        });
+        logHelpers.messageSent(whatsappNumber, nisn, permission_type, true);
+        successCount++;
+
+        logger.info("Permission confirmation tracking added", {
+          phoneNumber: whatsappNumber,
+          studentNisn: nisn,
+          permissionType: permission_type,
+        });
+      } catch (sendError) {
+        logger.error(`Failed to send message ${i + 1}`, {
+          phone: whatsappNumber.replace(/\d(?=\d{4})/g, "*"),
+          error: sendError.message,
+        });
+
+        errors.push({
+          phone: whatsappNumber,
+          error: sendError.message,
+        });
+
+        logHelpers.messageSent(
+          whatsappNumber,
+          student_name,
+          permission_type,
+          false
+        );
+      }
+    }
+
+    if (successCount > 0) {
+      const responseData = {
+        success: true,
+        message: `Pesan berhasil dikirim ke ${successCount}/${whatsappNumbers.length} nomor`,
+        details: {
+          successCount: successCount,
+          totalCount: whatsappNumbers.length,
+          pendingConfirmations: successCount,
           errors: errors.length > 0 ? errors : undefined,
         },
       };

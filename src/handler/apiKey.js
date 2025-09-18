@@ -23,6 +23,8 @@ const generateApiKey = () => {
       generateNewApiKey,
       config.security.apiKeyIntervalMinutes * 60 * 1000
     );
+
+    return currentApiKey;
   } catch (error) {
     logHelpers.error(error, { context: "API Key Generation" });
   }

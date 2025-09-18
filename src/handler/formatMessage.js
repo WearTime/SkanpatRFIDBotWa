@@ -157,6 +157,105 @@ const formatAttendanceMessage = (attendanceData) => {
 };
 
 /**
+ * Format pesan izin dengan konfirmasi
+ * @param {object} permissionData - Data izin
+ * @returns {string} - Formatted message
+ */
+const formatPermissionMessage = (permissionData) => {
+  try {
+    const {
+      student_name,
+      student_class,
+      permission_date,
+      permission_type,
+      permission_note,
+    } = permissionData;
+
+    logger.info("Formatting permission message", {
+      student: student_name,
+      type: permission_type,
+      date: permission_date,
+      class: student_class,
+      note: permission_note,
+    });
+
+    const schoolName = process.env.SCHOOL || "Sekolah";
+    const currentDate = new Date().toLocaleDateString("id-ID", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+
+    // Format permission type display
+    const permissionTypeDisplay =
+      {
+        sakit: "🤒 SAKIT",
+        izin: "📝 IZIN",
+        dispensasi: "⏰ DISPENSASI",
+      }[permission_type] || permission_type.toUpperCase();
+
+    // Format permission date
+    const formattedPermissionDate = new Date(
+      permission_date
+    ).toLocaleDateString("id-ID", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+
+    let message = `🏫 *${schoolName}*\n`;
+    message += `📅 Dikirim: ${currentDate}\n\n`;
+    message += `━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    message += `📋 *PERMINTAAN IZIN SISWA*\n`;
+    message += `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    message += `👨‍🎓 *Nama Siswa:* ${student_name}\n`;
+    message += `🏛️ *Kelas:* ${student_class}\n`;
+    message += `📊 *Jenis Izin:* ${permissionTypeDisplay}\n`;
+    message += `📅 *Tanggal Izin:* ${formattedPermissionDate}\n\n`;
+
+    message += `📝 *Keterangan:*\n`;
+    message += `${permission_note}\n\n`;
+
+    message += `━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    message += `⚠️ *MOHON KONFIRMASI*\n`;
+    message += `━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    message += `Silakan konfirmasi izin siswa dengan membalas pesan ini:\n\n`;
+    message += `✅ Ketik *"Ya"* atau *"Yes"* untuk *MENYETUJUI*\n`;
+    message += `❌ Ketik *"Tidak"* atau *"No"* untuk *MENOLAK*\n\n`;
+
+    message += `⏰ *Batas waktu konfirmasi: 24 jam*\n\n`;
+    message += `📱 Pesan otomatis dari sistem ${schoolName}`;
+
+    logger.info("Permission message formatted successfully", {
+      messageLength: message.length,
+      studentName: student_name,
+      permissionType: permission_type,
+    });
+
+    return message;
+  } catch (error) {
+    logger.error("Permission message formatting error", {
+      error: error.message,
+      permissionData: permissionData,
+    });
+
+    return (
+      `🏫 Notifikasi Izin\n\n` +
+      `Siswa: ${permissionData.student_name || "Unknown"}\n` +
+      `Tanggal: ${permissionData.permission_date || "Unknown"}\n` +
+      `Tipe: ${permissionData.permission_type || "Unknown"}\n` +
+      `Keterangan: ${permissionData.permission_note || "Unknown"}\n\n` +
+      `Silakan konfirmasi dengan membalas "Ya" atau "Tidak"\n\n` +
+      `Pesan otomatis dari sistem absensi.`
+    );
+  }
+};
+
+/**
  * Broadcast pesan ke multiple nomor (jika diperlukan)
  * @param {array} phoneNumbers - Array nomor telepon
  * @param {string} message - Pesan yang akan dikirim
@@ -201,6 +300,7 @@ const formatMultiplePhoneNumbers = (phoneNumbers) => {
 
 module.exports = {
   formatAttendanceMessage,
+  formatPermissionMessage,
   formataPhoneNumber,
   formatMultiplePhoneNumbers,
 };

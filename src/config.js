@@ -6,6 +6,11 @@ const config = {
     host: process.env.HOST || "localhost",
   },
 
+  webApi: {
+    apiUrl: process.env.LARAVEL_API_URL || "http://localhost:8000",
+    PermsConfirmEndPoint: "permission-confirm",
+  },
+
   whatsapp: {
     puppeteerConfig: {
       headless: process.env.NODE_ENV === "production",
@@ -55,6 +60,27 @@ const config = {
     },
     defaultClass: "N/A",
     footer: "_Pesan otomatis dari sistem absensi sekolah_",
+    approvalMessage: [
+      "ya",
+      "yes",
+      "y",
+      "setuju",
+      "izinkan",
+      "izin",
+      "ok",
+      "baiklah",
+    ],
+    rejectedMessage: [
+      "tidak",
+      "no",
+      "n",
+      "tolak",
+      "batal",
+      "jangan",
+      "ga",
+      "tidakboleh",
+      "gaboleh",
+    ],
   },
 
   phoneNumber: {

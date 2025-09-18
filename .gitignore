@@ -141,3 +141,7 @@ vite.config.ts.timestamp-*
 #Whatsapp Web Js Files
 .wwebjs_auth
 .wwebjs_cache
+
+#File Testing
+test.js
+testformat.js
