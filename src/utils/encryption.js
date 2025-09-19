@@ -1,4 +1,4 @@
-const { logHelpers, logger } = require("./logger");
+const { logHelpers, logger } = require("../handlers/logger");
 const crypto = require("crypto");
 const config = require("../config");
 
@@ -66,54 +66,76 @@ const decryptRequestData = (encryptedData, timestamp) => {
     throw new Error("Failed to decrypt GCM data: " + error.message);
   }
 };
+
+// FIX: Gunakan createCipheriv untuk GCM, bukan createCipherGCM
 const encryptResponseData = (data, timestamp = null) => {
   try {
     const algorithm = "aes-256-gcm";
     const key = Buffer.from(config.security.encryptionKey, "hex");
-    const iv = timestamp
-      ? generateIVFromTimestamp(timestamp)
-      : crypto.randomBytes(16);
+    const iv = generateIVFromTimestamp(timestamp);
+    const aad = Buffer.from("request-data"); // Must match PHP exactly
 
+    // FIX: Gunakan createCipheriv, bukan createCipherGCM
     const cipher = crypto.createCipheriv(algorithm, key, iv);
-    cipher.setAAD(Buffer.from("response-data"));
+    cipher.setAAD(aad);
 
     const jsonData = JSON.stringify(data);
     let encrypted = cipher.update(jsonData, "utf8");
-    const final = cipher.final();
-    const authTag = cipher.getAuthTag();
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
 
-    const encryptedBuffer = Buffer.concat([encrypted, final, authTag]);
+    // Get auth tag after final()
+    const authTag = cipher.getAuthTag();
+    const encryptedWithTag = Buffer.concat([encrypted, authTag]);
+
+    logger.info("GCM encryption successful", {
+      dataLength: jsonData.length,
+      encryptedLength: encryptedWithTag.length,
+      timestamp: timestamp,
+    });
 
     return {
-      encrypted_data: encryptedBuffer.toString("hex"),
-      timestamp: timestamp || Math.floor(Date.now() / 1000),
+      data: encryptedWithTag.toString("hex"),
+      timestamp: timestamp,
     };
   } catch (error) {
-    logHelpers.error(error, { context: "Response Data Encryption" });
-    throw new Error("Failed to encrypt response data: " + error.message);
+    logger.error("GCM encryption failed", {
+      error: error.message,
+      timestamp: timestamp,
+    });
+    throw new Error(`GCM Encryption Failed: ${error.message}`);
   }
 };
 
+// FIX: Perbaiki implementasi CBC encryption
 const encryptDataCBC = (data, timestamp) => {
   try {
     const algorithm = "aes-256-cbc";
     const key = Buffer.from(config.security.encryptionKey, "hex");
     const iv = generateIVFromTimestamp(timestamp);
 
+    // FIX: Gunakan createCipheriv, bukan createCipher
     const cipher = crypto.createCipheriv(algorithm, key, iv);
-    const jsonData = JSON.stringify(data);
 
+    const jsonData = JSON.stringify(data);
     let encrypted = cipher.update(jsonData, "utf8");
-    const final = cipher.final();
-    const encryptedBuffer = Buffer.concat([encrypted, final]);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+
+    logger.info("CBC encryption successful", {
+      dataLength: jsonData.length,
+      encryptedLength: encrypted.length,
+      timestamp: timestamp,
+    });
 
     return {
-      encrypted_data: encryptedBuffer.toString("hex"),
+      data: encrypted.toString("hex"),
       timestamp: timestamp,
     };
   } catch (error) {
-    logHelpers.error(error, { context: "CBC Encryption" });
-    throw new Error("Failed to encrypt data with CBC: " + error.message);
+    logger.error("CBC encryption failed", {
+      error: error.message,
+      timestamp: timestamp,
+    });
+    throw new Error(`CBC Encryption Failed: ${error.message}`);
   }
 };
 
@@ -169,6 +191,26 @@ const smartDecrypt = (encryptedData, timestamp) => {
   }
 };
 
+// FIX: Tambahkan smart encrypt yang cocok dengan PHP
+const smartEncrypt = (data, timestamp) => {
+  try {
+    logger.info("Trying GCM encryption first...");
+    return encryptResponseData(data, timestamp);
+  } catch (gcmError) {
+    logger.warn("GCM encrypt failed, trying CBC fallback", {
+      error: gcmError.message,
+    });
+
+    try {
+      logger.info("Trying CBC encryption...");
+      return encryptDataCBC(data, timestamp);
+    } catch (cbcError) {
+      logHelpers.error(cbcError, { context: "All Encryption Failed" });
+      throw new Error("All encryption methods failed: " + gcmError.message);
+    }
+  }
+};
+
 const generateEncryptionKey = () => {
   const key = crypto.randomBytes(32).toString("hex");
   return key;
@@ -198,17 +240,28 @@ const testEncryption = (encryptionKey) => {
   logger.info("🧪 Testing encryption with timestamp-based IV...");
 
   try {
-    const encrypted = encryptDataCBC(testData, timestamp);
-    logger.info("✅ Encryption test passed");
+    // Test GCM
+    logger.info("Testing GCM encryption...");
+    const encryptedGCM = encryptResponseData(testData, timestamp);
+    const decryptedGCM = decryptRequestData(encryptedGCM.data, timestamp);
 
-    const decrypted = decryptDataCBC(encrypted.encrypted_data, timestamp);
+    if (JSON.stringify(testData) === JSON.stringify(decryptedGCM)) {
+      logger.info("✅ GCM encryption/decryption test passed");
+    } else {
+      logger.error("❌ GCM test failed - data mismatch");
+    }
 
-    if (JSON.stringify(testData) === JSON.stringify(decrypted)) {
-      logger.info("✅ Decryption test passed");
+    // Test CBC
+    logger.info("Testing CBC encryption...");
+    const encryptedCBC = encryptDataCBC(testData, timestamp);
+    const decryptedCBC = decryptDataCBC(encryptedCBC.data, timestamp);
+
+    if (JSON.stringify(testData) === JSON.stringify(decryptedCBC)) {
+      logger.info("✅ CBC encryption/decryption test passed");
       logger.info("✅ All encryption tests completed successfully!\n");
       return true;
     } else {
-      logger.error("❌ Decryption test failed - data mismatch");
+      logger.error("❌ CBC test failed - data mismatch");
       return false;
     }
   } catch (error) {
@@ -223,6 +276,7 @@ module.exports = {
   encryptDataCBC,
   decryptDataCBC,
   smartDecrypt,
+  smartEncrypt, // FIX: Export smart encrypt
   generateEncryptionKey,
   generateSharedSecret,
   generateAdminSecret,

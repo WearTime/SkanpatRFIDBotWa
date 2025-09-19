@@ -20,7 +20,7 @@ const generateApiKey = () => {
     logger.info(`⏰ Timestamp: ${timestamp}`);
 
     setTimeout(
-      generateNewApiKey,
+      generateApiKey,
       config.security.apiKeyIntervalMinutes * 60 * 1000
     );
 

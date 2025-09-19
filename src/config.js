@@ -8,7 +8,7 @@ const config = {
 
   webApi: {
     apiUrl: process.env.LARAVEL_API_URL || "http://localhost:8000",
-    PermsConfirmEndPoint: "permission-confirm",
+    PermsConfirmEndPoint: "permissions/confirm",
   },
 
   whatsapp: {
