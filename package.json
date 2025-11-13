@@ -1,13 +1,18 @@
 {
-  "name": "botwaortusiswa",
-  "version": "1.0.0",
-  "description": "Ini adalah Bot wa untuk mendapatkan data dari rfid laravel terus kirim ke wa orang tua siswa",
-  "main": "src/main.js",
+  "name": "botwaortusiswa-ts",
+  "version": "2.0.0",
+  "description": "WhatsApp Bot untuk sistem absensi dengan TypeScript - Support WhatsApp-Web.js & Baileys",
+  "main": "dist/main.js",
   "scripts": {
-    "start": "node src/main.js",
-    "dev": "nodemon server.js",
-    "generate-key": "node src/generate/encryptionKey.js",
-    "test": "jest"
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
+    "generate-key": "ts-node src/generate/encryptionKey.ts",
+    "test": "jest",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "clean": "rimraf dist"
   },
   "repository": {
     "type": "git",
@@ -18,19 +23,39 @@
     "bot",
     "rfid",
     "attendance",
-    "laravel"
+    "laravel",
+    "typescript",
+    "baileys",
+    "whatsapp-web.js"
   ],
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.21",
     "axios": "^1.12.2",
     "dotenv": "^17.2.2",
-    "express": "^4.18.2",
+    "express": "^4.21.2",
+    "pino": "^10.1.0",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.22.2",
     "winston": "^3.17.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@typescript-eslint/eslint-plugin": "^8.46.4",
+    "@typescript-eslint/parser": "^8.46.4",
+    "eslint": "^9.39.1",
     "jest": "^29.7.0",
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.1",
+    "prettier": "^3.6.2",
+    "rimraf": "^6.1.0",
+    "ts-jest": "^29.4.5",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "author": "Muhamad Rizqi Wiransyah & Muhammad Bangkit Sanjaya",
   "license": "ISC",
