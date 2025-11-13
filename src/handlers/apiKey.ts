@@ -68,6 +68,3 @@ export function validateApiKey(receivedKey: string): boolean {
     return false;
   }
 }
-
-// Auto-generate API key on module load
-generateApiKey();

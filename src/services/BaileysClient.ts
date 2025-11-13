@@ -8,10 +8,14 @@ import makeWASocket, {
   WASocket,
   ConnectionState,
   proto,
+  fetchLatestBaileysVersion,
+  CacheStore,
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import config from '../config';
+import P from 'pino';
+import NodeCache from 'node-cache';
 
 export class BaileysClient implements IWhatsAppClient {
   private sock: WASocket | null = null;
@@ -20,6 +24,28 @@ export class BaileysClient implements IWhatsAppClient {
   private authDir: string;
   private clientInfo: ClientInfo | null = null;
   private reconnecting = false;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private retryCache = new NodeCache();
+  private msgRetryCounterCache: CacheStore = (() => {
+    const cache = this.retryCache;
+    return {
+      get<T>(key: string): T | undefined {
+        const value = cache.get(key);
+        return value as T | undefined;
+      },
+      set<T>(key: string, value: T): boolean {
+        cache.set(key, value);
+        return true;
+      },
+      del(key: string) {
+        cache.del(key);
+      },
+      flushAll() {
+        cache.flushAll();
+      },
+    };
+  })();
 
   constructor() {
     const schoolName = process.env.SCHOOL || 'default';
@@ -38,14 +64,29 @@ export class BaileysClient implements IWhatsAppClient {
     logger.info('Initializing Baileys client...');
 
     try {
+      const { version, isLatest } = await fetchLatestBaileysVersion();
+      logger.info('Baileys version info', { version, isLatest });
+
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
+      const pinoLogger = P({ level: 'silent' });
+
       this.sock = makeWASocket({
+        version,
         auth: state,
-        // printQRInTerminal: config.whatsapp.baileys.printQRInTerminal,
+        printQRInTerminal: false,
         defaultQueryTimeoutMs: config.whatsapp.baileys.defaultQueryTimeoutMs,
         syncFullHistory: config.whatsapp.baileys.syncFullHistory,
-        logger: require('pino')({ level: 'silent' }),
+        logger: pinoLogger,
+
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000,
+        markOnlineOnConnect: true,
+
+        browser: ['School Bot', 'Chrome', '121.0.0'],
+
+        msgRetryCounterCache: this.msgRetryCounterCache,
+        generateHighQualityLinkPreview: false,
       });
 
       this.setupEventHandlers(saveCreds);
@@ -64,11 +105,13 @@ export class BaileysClient implements IWhatsAppClient {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log('='.repeat(50));
+        console.log('\n' + '='.repeat(55));
         console.log('📱 SCAN QR CODE WHATSAPP');
-        console.log('='.repeat(50));
+        console.log('='.repeat(55));
         qrcode.generate(qr, { small: true });
-        console.log('='.repeat(50));
+        console.log('='.repeat(55));
+        console.log('⏰ QR Code expires in 60 seconds');
+        console.log('='.repeat(55) + '\n');
 
         logHelpers.whatsappEvent('QR Code Generated', {
           provider: 'baileys',
@@ -76,34 +119,83 @@ export class BaileysClient implements IWhatsAppClient {
       }
 
       if (connection === 'close') {
-        const shouldReconnect =
-          (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         this.ready = false;
 
         logger.warn('Connection closed', {
           provider: 'baileys',
+          statusCode,
           shouldReconnect,
-          statusCode: (lastDisconnect?.error as Boom)?.output?.statusCode,
+          reconnectAttempts: this.reconnectAttempts,
         });
 
-        if (shouldReconnect && !this.reconnecting) {
+        if (statusCode === DisconnectReason.loggedOut) {
+          logger.error('Logged out! Please delete auth folder and scan QR again');
+          logHelpers.whatsappEvent('Logged Out', {
+            provider: 'baileys',
+            message: 'Delete baileys_auth folder and restart',
+          });
+          return;
+        }
+
+        if (statusCode === 405 || statusCode === 401) {
+          logger.error('Auth error! Clearing auth state...');
+
+          try {
+            if (fs.existsSync(this.authDir)) {
+              fs.rmSync(this.authDir, { recursive: true, force: true });
+              logger.info('Auth state cleared. Please restart and scan QR again.');
+            }
+          } catch (err) {
+            logger.error('Failed to clear auth state', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+          return;
+        }
+
+        if (
+          shouldReconnect &&
+          !this.reconnecting &&
+          this.reconnectAttempts < this.maxReconnectAttempts
+        ) {
           this.reconnecting = true;
-          logger.info('Reconnecting...');
+          this.reconnectAttempts++;
+
+          const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+          logger.info(
+            `Reconnecting in ${delay}ms... (Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`
+          );
+
           setTimeout(async () => {
             this.reconnecting = false;
             await this.initialize();
-          }, 5000);
+          }, delay);
+        } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          logger.error('Max reconnection attempts reached. Please restart manually.');
+          logHelpers.whatsappEvent('Max Reconnect Attempts', {
+            provider: 'baileys',
+            attempts: this.reconnectAttempts,
+          });
         }
+      } else if (connection === 'connecting') {
+        logger.info('Connecting to WhatsApp...', {
+          provider: 'baileys',
+        });
       } else if (connection === 'open') {
         this.ready = true;
+        this.reconnectAttempts = 0;
         await this.loadClientInfo();
 
-        logger.info('✅ WhatsApp Bot berhasil terhubung!');
+        console.log('\n' + '='.repeat(50));
+        console.log('✅ WhatsApp Bot berhasil terhubung!');
         if (this.clientInfo) {
-          logger.info(`📱 Nomor: ${this.clientInfo.phone}`);
-          logger.info(`👤 Nama: ${this.clientInfo.name}`);
+          console.log(`📱 Nomor: ${this.clientInfo.phone}`);
+          console.log(`👤 Nama: ${this.clientInfo.name}`);
         }
+        console.log('='.repeat(50) + '\n');
 
         logHelpers.whatsappEvent('Client Ready', {
           provider: 'baileys',
@@ -113,7 +205,9 @@ export class BaileysClient implements IWhatsAppClient {
       }
     });
 
-    this.sock.ev.on('creds.update', saveCreds);
+    this.sock.ev.on('creds.update', async () => {
+      await saveCreds();
+    });
 
     this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
@@ -138,6 +232,14 @@ export class BaileysClient implements IWhatsAppClient {
         }
       }
     });
+
+    this.sock.ev.on('groups.update', (updates) => {
+      logger.debug('Groups updated', { count: updates.length });
+    });
+
+    this.sock.ev.on('presence.update', (presenceUpdate) => {
+      logger.debug('Presence updated', { jid: presenceUpdate.id });
+    });
   }
 
   private extractMessageText(message: proto.IWebMessageInfo): string | null {
@@ -148,6 +250,10 @@ export class BaileysClient implements IWhatsAppClient {
       return msg.conversation;
     } else if (msg.extendedTextMessage?.text) {
       return msg.extendedTextMessage.text;
+    } else if (msg.imageMessage?.caption) {
+      return msg.imageMessage.caption;
+    } else if (msg.videoMessage?.caption) {
+      return msg.videoMessage.caption;
     }
 
     return null;
@@ -160,7 +266,7 @@ export class BaileysClient implements IWhatsAppClient {
       const info = this.sock.user;
       if (info) {
         this.clientInfo = {
-          phone: info.id.split(':')[0] || info.id,
+          phone: info.id.split(':')[0] || info.id.replace('@s.whatsapp.net', ''),
           name: info.name || info.id,
         };
       }
@@ -185,9 +291,18 @@ export class BaileysClient implements IWhatsAppClient {
     }
 
     try {
-      const jid = phoneNumber.replace('@c.us', '@s.whatsapp.net');
+      let jid = phoneNumber;
+      if (phoneNumber.includes('@c.us')) {
+        jid = phoneNumber.replace('@c.us', '@s.whatsapp.net');
+      } else if (!phoneNumber.includes('@')) {
+        jid = phoneNumber + '@s.whatsapp.net';
+      }
 
       await this.sock.sendMessage(jid, { text: message });
+
+      logger.info('Message sent successfully via Baileys', {
+        to: jid.replace(/\d(?=\d{4})/g, '*'),
+      });
     } catch (error) {
       logger.error('Failed to send message', {
         error: error instanceof Error ? error.message : String(error),
@@ -199,10 +314,18 @@ export class BaileysClient implements IWhatsAppClient {
 
   async destroy(): Promise<void> {
     if (this.sock) {
-      await this.sock.logout();
+      try {
+        await this.sock.logout();
+        logger.info('Baileys client logged out successfully');
+      } catch (error) {
+        logger.warn('Error during logout', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       this.sock = null;
     }
     this.ready = false;
+    this.reconnectAttempts = 0;
   }
 
   onMessage(handler: (from: string, message: string) => void): void {
