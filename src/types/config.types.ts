@@ -1,9 +1,10 @@
-import { LoggingConfig } from "./logging.types";
-import { MessagesConfig } from "./message.types";
-import { PhoneNumberConfig } from "./phone.types";
-import { SecurityConfig } from "./security.types";
-import { WebApiConfig } from "./webApi.types";
-import { WhatsAppConfig } from "./whatsapp.types";
+import { LoggingConfig } from './logging.types';
+import { MessagesConfig } from './message.types';
+import { PhoneNumberConfig } from './phone.types';
+import { QueueConfig } from './queue.types';
+import { SecurityConfig } from './security.types';
+import { WebApiConfig } from './webApi.types';
+import { WhatsAppConfig } from './whatsapp.types';
 
 export interface ServerConfig {
   port: number;
@@ -24,4 +25,5 @@ export interface Config {
   messages: MessagesConfig;
   phoneNumber: PhoneNumberConfig;
   rateLimiting: RateLimitingConfig;
+  queue: QueueConfig;
 }

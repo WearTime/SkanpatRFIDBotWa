@@ -50,11 +50,7 @@ export class BaileysClient implements IWhatsAppClient {
 
   constructor() {
     const schoolName = process.env.SCHOOL || 'default';
-    this.authDir = path.join(
-      process.cwd(),
-      'baileys_auth',
-      `${schoolName}-${new Date().getFullYear()}`
-    );
+    this.authDir = path.join(process.cwd(), 'baileys_auth', `${schoolName}`);
 
     if (!fs.existsSync(this.authDir)) {
       fs.mkdirSync(this.authDir, { recursive: true });
@@ -69,9 +65,10 @@ export class BaileysClient implements IWhatsAppClient {
     });
 
     if (fs.existsSync(this.authDir) && !this.hasValidAuth()) {
-      logger.warn('⚠️  Detected corrupted auth folder');
-      await this.clearAuthFolder();
+      logger.warn('⚠️  Detected potentially corrupted auth folder');
+      logger.warn('⚠️  If connection fails, manually delete: baileys_auth/');
     }
+
     try {
       const { version, isLatest } = await fetchLatestBaileysVersion();
       logger.info('Baileys version info', { version, isLatest });
@@ -153,59 +150,22 @@ export class BaileysClient implements IWhatsAppClient {
           errorMessage: errorMessage,
         });
 
-        const isInvalidAuth =
-          statusCode === 401 ||
-          statusCode === 403 ||
-          statusCode === 405 ||
-          statusCode === DisconnectReason.loggedOut ||
-          errorMessage.includes('Connection Failure') ||
-          errorMessage.includes('Intentional Logout');
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+        const isAuthError = statusCode === 401 && errorMessage.includes('Intentional Logout');
 
-        if (isInvalidAuth) {
-          logger.error('❌ INVALID AUTH DETECTED!');
-          logger.warn(`Error: ${errorMessage} (Status: ${statusCode})`);
+        if (isLoggedOut || isAuthError) {
+          logger.error('❌ LOGGED OUT! Session invalid.');
+          logger.error('⚠️  This usually happens when:');
+          logger.error('   1. User logged out from phone');
+          logger.error('   2. WhatsApp Web session was deleted from phone');
+          logger.error('   3. Phone number changed');
 
-          if (fs.existsSync(this.authDir) && this.reconnectAttempts === 0) {
-            logger.warn('🗑️  Auto-clearing invalid auth folder...');
+          logHelpers.whatsappEvent('WhatsApp Logged Out - Manual Action Required', {
+            provider: 'baileys',
+            action: 'Please delete baileys_auth folder and restart to scan QR again',
+          });
 
-            try {
-              const backupDir = `${this.authDir}_backup_${Date.now()}`;
-              fs.renameSync(this.authDir, backupDir);
-              logger.info(`✅ Old auth backed up to: ${backupDir}`);
-
-              fs.mkdirSync(this.authDir, { recursive: true });
-              logger.info('✅ New auth folder created');
-
-              logger.info('🔄 Reinitializing to generate new QR code...');
-
-              this.reconnectAttempts = 0; // Reset counter
-              this.reconnecting = true;
-
-              setTimeout(async () => {
-                this.reconnecting = false;
-                await this.initialize();
-              }, 2000);
-
-              return;
-            } catch (clearError) {
-              logger.error('Failed to clear auth folder', {
-                error: clearError instanceof Error ? clearError.message : String(clearError),
-              });
-
-              logger.error('⚠️  MANUAL ACTION REQUIRED:');
-              logger.error('   1. Stop the bot (Ctrl+C or pm2 stop)');
-              logger.error('   2. Delete folder: rm -rf baileys_auth/');
-              logger.error('   3. Restart: npm start or pm2 restart bot-wa-skanpat');
-              return;
-            }
-          }
-
-          logger.error('❌ Auth cleared but still getting error.');
-          logger.error('⚠️  Possible causes:');
-          logger.error('   1. WhatsApp server issues');
-          logger.error('   2. Phone not connected to internet');
-          logger.error('   3. Phone number blocked/banned');
-          logger.error('   4. Network firewall blocking WhatsApp');
+          logger.warn('⚠️  Run: rm -rf baileys_auth/ && pm2 restart bot-wa-skanpat');
 
           return;
         }
@@ -232,7 +192,7 @@ export class BaileysClient implements IWhatsAppClient {
           logger.error('⚠️  Please check:');
           logger.error('   1. Internet connection');
           logger.error('   2. WhatsApp server status');
-          logger.error('   3. Firewall settings');
+          logger.error('   3. Try deleting baileys_auth/ and re-scan QR');
 
           logHelpers.whatsappEvent('Max Reconnect Attempts Reached', {
             provider: 'baileys',
@@ -263,6 +223,7 @@ export class BaileysClient implements IWhatsAppClient {
           provider: 'baileys',
           phoneNumber: this.clientInfo?.phone,
           pushname: this.clientInfo?.name,
+          reconnectAttempts: this.reconnectAttempts,
         });
       }
     });
@@ -300,14 +261,6 @@ export class BaileysClient implements IWhatsAppClient {
           }
         }
       }
-    });
-
-    this.sock.ev.on('groups.update', (updates) => {
-      logger.debug('Groups updated', { count: updates.length });
-    });
-
-    this.sock.ev.on('presence.update', (presenceUpdate) => {
-      logger.debug('Presence updated', { jid: presenceUpdate.id });
     });
   }
 
@@ -384,7 +337,7 @@ export class BaileysClient implements IWhatsAppClient {
   async destroy(): Promise<void> {
     if (this.sock) {
       try {
-        await this.sock.logout();
+        this.sock?.end(new Error('shutdown'));
         logger.info('Baileys client logged out successfully');
       } catch (error) {
         logger.warn('Error during logout', {
@@ -400,31 +353,6 @@ export class BaileysClient implements IWhatsAppClient {
   onMessage(handler: (from: string, message: string) => void): void {
     this.messageHandlers.push(handler);
   }
-  private async clearAuthFolder(): Promise<boolean> {
-    try {
-      if (!fs.existsSync(this.authDir)) {
-        logger.info('Auth folder does not exist, nothing to clear');
-        return true;
-      }
-
-      const backupDir = `${this.authDir}_invalid_${Date.now()}`;
-      fs.renameSync(this.authDir, backupDir);
-
-      logger.info('✅ Invalid auth moved to backup', {
-        backup: backupDir,
-      });
-
-      fs.mkdirSync(this.authDir, { recursive: true });
-      logger.info('✅ Fresh auth folder created');
-
-      return true;
-    } catch (error) {
-      logger.error('Failed to clear auth folder', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return false;
-    }
-  }
 
   private hasValidAuth(): boolean {
     try {
@@ -438,7 +366,26 @@ export class BaileysClient implements IWhatsAppClient {
       }
 
       const stats = fs.statSync(credsFile);
-      return stats.size > 0;
+      if (stats.size === 0) {
+        return false;
+      }
+
+      try {
+        const credsContent = fs.readFileSync(credsFile, 'utf-8');
+        const creds = JSON.parse(credsContent);
+
+        if (!creds.me || !creds.me.id) {
+          logger.warn('Creds file exists but missing critical data');
+          return false;
+        }
+
+        return true;
+      } catch (parseError) {
+        logger.warn('Creds file corrupted', {
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+        });
+        return false;
+      }
     } catch (error) {
       logger.warn('Error checking auth validity', {
         error: error instanceof Error ? error.message : String(error),
